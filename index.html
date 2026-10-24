@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="application-name" content="헬스 루틴">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<title>헬스 루틴 기록</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<style>
+:root{color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html,body{height:100%;margin:0;background:#000;color:#fff;overscroll-behavior:none;-webkit-tap-highlight-color:transparent;font-family:system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif}
+#app{height:100%}
+input,textarea{background:#18181b;border:2px solid #3f3f46;border-radius:.75rem;color:#fff;min-width:0;width:100%}
+input:focus,textarea:focus{outline:none;border-color:#a3e635}
+button{touch-action:manipulation}
+button:active{transform:scale(.96)}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const K='gymapp.v1';
+let S=null;
+try{S=JSON.parse(localStorage.getItem(K))}catch(e){}
+S=S||{routines:[],last:{},logs:[],session:null};
+const save=()=>{try{localStorage.setItem(K,JSON.stringify(S))}catch(e){}};
+const A=document.getElementById('app');
+const uid=()=>Math.random().toString(36).slice(2,9);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=s=>Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
+let view=S.session?'work':'home',draft=null,armed='',msg='';
+let T={end:0,total:1,flash:0};
+
+/* ---------- audio ---------- */
+let AC;
+function unlock(){try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume()}catch(e){}}
+function beep(){
+  unlock();
+  if(AC){for(let i=0;i<3;i++){
+    const o=AC.createOscillator(),g=AC.createGain(),t=AC.currentTime+i*.4;
+    o.type='square';o.frequency.value=880;o.connect(g);g.connect(AC.destination);
+    g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.4,t+.01);g.gain.exponentialRampToValueAtTime(.0001,t+.25);
+    o.start(t);o.stop(t+.3);
+  }}
+  try{navigator.vibrate&&navigator.vibrate([200,100,200,100,200])}catch(e){}
+}
+let WL;async function wake(){try{WL=await navigator.wakeLock.request('screen')}catch(e){}}
+
+/* ---------- helpers ---------- */
+const routine=()=>S.session&&S.routines.find(r=>r.id===S.session.rid);
+const curEx=()=>{const r=routine();return r&&r.exercises[Math.min(S.session.idx,r.exercises.length-1)]};
+function build(ex){
+  const p=S.last[ex.name]||[];
+  return Array.from({length:ex.sets},(_,i)=>{const q=p[i]||p[p.length-1];
+    return{w:q?q.w:ex.w,r:q?q.r:ex.r,d:false,p:p[i]?p[i].w+'×'+p[i].r:'-'}});
+}
+const getSets=ex=>S.session.data[ex.id]||(S.session.data[ex.id]=build(ex));
+const num=v=>{const n=parseFloat(v);return isNaN(n)?0:n};
+const btn='rounded-xl font-bold active:bg-zinc-700 ';
+
+/* ---------- views ---------- */
+function render(){
+  if(view==='home')home();else if(view==='edit')edit();else if(view==='set')settings();else work();
+  updateTimer();
+}
+function home(){
+  const resume=S.session&&routine();
+  A.innerHTML=`<div class="h-full flex flex-col p-3 gap-3 max-w-xl mx-auto">
+  <div class="flex items-center justify-between shrink-0"><h1 class="text-2xl font-black text-lime-400">💪 내 루틴</h1>
+  <button onclick="go('set')" class="${btn}bg-zinc-800 h-12 px-4 text-lg">⚙ 설정</button></div>
+  <div class="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3">
+  ${resume?`<button onclick="go('work')" class="${btn}bg-lime-400 text-black h-16 text-xl">▶ 진행 중: ${esc(resume.name)} 이어하기</button>`:''}
+  ${S.routines.map(r=>`<div class="bg-zinc-900 rounded-2xl p-3 flex items-center gap-2">
+    <div class="flex-1 min-w-0"><div class="text-xl font-bold truncate">${esc(r.name)}</div><div class="text-zinc-400 text-sm">${r.exercises.length}개 종목</div></div>
+    <button onclick="editR('${r.id}')" class="${btn}bg-zinc-800 h-14 w-14 text-xl">✎</button>
+    <button onclick="startW('${r.id}')" class="${btn}bg-lime-400 text-black h-14 px-5 text-lg">시작</button></div>`).join('')||'<p class="text-zinc-400 text-center mt-10">아직 루틴이 없어요.<br>아래 버튼으로 추가하세요.</p>'}
+  </div>
+  <button onclick="editR()" class="${btn}shrink-0 bg-zinc-800 border-2 border-dashed border-zinc-600 h-16 text-xl">＋ 새 루틴</button></div>`;
+}
+function work(){
+  const r=routine();
+  if(!r||!r.exercises.length){S.session=null;save();view='home';return render()}
+  const n=r.exercises.length;S.session.idx=Math.min(S.session.idx,n-1);
+  const i=S.session.idx,ex=r.exercises[i],sets=getSets(ex);
+  A.innerHTML=`<div class="h-full flex flex-col gap-2 p-2 max-w-xl mx-auto">
+  <div class="shrink-0 flex items-center gap-2">
+    <button onclick="mv(-1)" class="${btn}bg-zinc-800 h-12 w-14 text-2xl ${i==0?'opacity-30':''}">◀</button>
+    <div class="flex-1 min-w-0 text-center"><div class="text-xl font-black truncate">${esc(ex.name)}</div><div class="text-xs text-zinc-400">${i+1}/${n} · ${esc(r.name)}</div></div>
+    <button onclick="mv(1)" class="${btn}bg-zinc-800 h-12 w-14 text-2xl ${i==n-1?'opacity-30':''}">▶</button></div>
+  <div class="shrink-0 relative rounded-2xl bg-zinc-900 overflow-hidden text-center pt-1">
+    <div id="tb" class="absolute inset-y-0 left-0 bg-lime-500/25" style="width:0"></div>
+    <div id="tm" class="relative font-black tabular-nums leading-none py-1 text-[clamp(3.2rem,20vw,6rem)]">0:00</div>
+    <div class="relative flex gap-2 p-2"><button onclick="addT(10)" class="${btn}flex-1 h-12 bg-zinc-700 text-lg">+10초</button>
+    <button onclick="skipT()" class="${btn}flex-1 h-12 bg-zinc-700 text-lg">건너뛰기 ⏭</button></div></div>
+  <div class="grid grid-cols-[2rem_1fr_1.1fr_1.1fr_3.2rem] gap-1.5 text-xs text-zinc-400 text-center shrink-0 px-1"><span>세트</span><span>이전</span><span>kg</span><span>회</span><span>완료</span></div>
+  <div class="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5">
+  ${sets.map((s,k)=>`<div class="grid grid-cols-[2rem_1fr_1.1fr_1.1fr_3.2rem] gap-1.5 items-center p-1 rounded-xl ${s.d?'bg-lime-900/40':'bg-zinc-900'}">
+    <span class="text-center font-bold text-lg">${k+1}</span><span class="text-center text-xs text-zinc-400">${s.p}</span>
+    <input type="number" inputmode="decimal" step="0.5" value="${s.w}" oninput="setV(${k},'w',this.value)" class="h-12 text-xl text-center font-bold px-1">
+    <input type="number" inputmode="numeric" value="${s.r}" oninput="setV(${k},'r',this.value)" class="h-12 text-xl text-center font-bold px-1">
+    <button onclick="tog(${k})" class="${btn}h-12 text-2xl ${s.d?'bg-lime-400 text-black':'bg-zinc-700 text-zinc-400'}">✓</button></div>`).join('')}
+  <button onclick="addSet()" class="${btn}bg-zinc-800 h-11 text-zinc-300">＋ 세트 추가</button></div>
+  <div class="shrink-0 flex gap-2"><button onclick="go('home')" class="${btn}bg-zinc-800 h-12 px-4">홈</button>
+  <button onclick="finishW()" class="${btn}flex-1 bg-lime-400 text-black h-12 text-lg">운동 종료 · 저장</button></div></div>`;
+}
+function edit(){
+  const d=draft;
+  A.innerHTML=`<div class="h-full flex flex-col gap-2 p-3 max-w-xl mx-auto">
+  <input value="${esc(d.name)}" oninput="draft.name=this.value" placeholder="루틴 이름 (예: 가슴/삼두)" class="shrink-0 h-14 text-xl font-bold px-3">
+  <div class="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
+  ${d.exercises.map((e,k)=>`<div class="bg-zinc-900 rounded-2xl p-2 flex flex-col gap-2">
+    <div class="flex gap-2"><input value="${esc(e.name)}" oninput="draft.exercises[${k}].name=this.value" placeholder="종목명 (예: 벤치프레스)" class="h-12 text-lg px-3">
+    <button onclick="delEx(${k})" class="${btn}bg-zinc-800 w-12 shrink-0 text-red-400">✕</button></div>
+    <div class="grid grid-cols-4 gap-2 text-center text-xs text-zinc-400">
+    ${[['sets','세트'],['w','목표 kg'],['r','목표 회'],['rest','휴식 초']].map(([f,l])=>`<label>${l}<input type="number" inputmode="decimal" value="${e[f]}" oninput="draft.exercises[${k}].${f}=num(this.value)" class="h-12 text-lg text-center px-1 mt-1 text-white"></label>`).join('')}</div></div>`).join('')}
+  <button onclick="addEx()" class="${btn}bg-zinc-800 h-14 text-lg">＋ 종목 추가</button></div>
+  <div class="shrink-0 flex gap-2"><button onclick="go('home')" class="${btn}bg-zinc-800 h-14 px-4">취소</button>
+  ${S.routines.some(r=>r.id===d.id)?`<button onclick="delR()" class="${btn}bg-zinc-800 h-14 px-3 text-red-400">${armed==='r'?'정말 삭제?':'삭제'}</button>`:''}
+  <button onclick="saveR()" class="${btn}flex-1 bg-lime-400 text-black h-14 text-lg">저장</button></div></div>`;
+}
+function settings(){
+  A.innerHTML=`<div class="h-full flex flex-col gap-2 p-3 max-w-xl mx-auto">
+  <div class="flex items-center justify-between shrink-0"><h1 class="text-xl font-black text-lime-400">⚙ 설정 · 백업</h1><button onclick="go('home')" class="${btn}bg-zinc-800 h-12 px-4">닫기</button></div>
+  <p class="text-sm text-zinc-400 shrink-0">내보내기: 데이터를 아래 칸에 표시하고 복사합니다. 메모장 등에 붙여넣어 보관하세요. 불러오기: 백업 내용을 칸에 붙여넣거나 파일을 고른 뒤 '불러오기'를 누르세요.</p>
+  <textarea id="js" class="flex-1 min-h-0 p-2 text-xs font-mono" placeholder="백업 JSON"></textarea>
+  <div class="text-sm text-lime-400 shrink-0 min-h-5" id="msg">${esc(msg)}</div>
+  <div class="grid grid-cols-2 gap-2 shrink-0">
+  <button onclick="expJ()" class="${btn}bg-lime-400 text-black h-14">내보내기(복사)</button>
+  <button onclick="impJ()" class="${btn}bg-zinc-700 h-14">불러오기</button>
+  <button onclick="dlJ()" class="${btn}bg-zinc-800 h-12">파일로 저장</button>
+  <label class="${btn}bg-zinc-800 h-12 flex items-center justify-center">파일 선택<input type="file" accept=".json,application/json" class="hidden" onchange="pickF(this)"></label></div></div>`;
+}
+
+/* ---------- actions ---------- */
+function go(v){view=v;armed='';msg='';render()}
+function editR(id){
+  const r=S.routines.find(x=>x.id===id);
+  draft=r?JSON.parse(JSON.stringify(r)):{id:uid(),name:'',exercises:[]};
+  go('edit');
+}
+const addEx=()=>{draft.exercises.push({id:uid(),name:'',sets:3,w:20,r:10,rest:90});render()};
+const delEx=k=>{draft.exercises.splice(k,1);render()};
+function saveR(){
+  draft.name=draft.name.trim()||'새 루틴';
+  draft.exercises.forEach((e,k)=>{e.name=(e.name||'').trim()||'종목 '+(k+1);e.sets=Math.max(1,Math.round(e.sets)||1);e.rest=Math.max(0,Math.round(e.rest)||0)});
+  const k=S.routines.findIndex(r=>r.id===draft.id);
+  k>=0?S.routines[k]=draft:S.routines.push(draft);
+  save();go('home');
+}
+function delR(){
+  if(armed!=='r'){armed='r';return render()}
+  S.routines=S.routines.filter(r=>r.id!==draft.id);
+  if(S.session&&S.session.rid===draft.id)S.session=null;
+  save();go('home');
+}
+function startW(id){
+  unlock();wake();
+  if(!(S.session&&S.session.rid===id))S.session={rid:id,idx:0,data:{}};
+  T.end=0;save();go('work');
+}
+function mv(d){
+  const r=routine(),n=r.exercises.length,i=S.session.idx+d;
+  if(i<0||i>=n)return;S.session.idx=i;save();render();
+}
+function setV(k,f,v){getSets(curEx())[k][f]=num(v);save()}
+function tog(k){
+  unlock();
+  const ex=curEx(),s=getSets(ex)[k];s.d=!s.d;
+  if(s.d&&ex.rest>0){T={end:Date.now()+ex.rest*1000,total:ex.rest,flash:0}}
+  save();render();
+}
+function addSet(){const ex=curEx(),s=getSets(ex),l=s[s.length-1]||{w:0,r:0};s.push({w:l.w,r:l.r,d:false,p:'-'});save();render()}
+function addT(n){unlock();const now=Date.now();if(T.end>now){T.end+=n*1000;T.total+=n}else{T={end:now+n*1000,total:n,flash:0}}updateTimer()}
+function skipT(){T.end=0;T.flash=0;updateTimer()}
+function finishW(){
+  const r=routine();if(!r)return go('home');
+  const ex=[];
+  r.exercises.forEach(e=>{
+    const done=(S.session.data[e.id]||[]).filter(s=>s.d).map(s=>({w:s.w,r:s.r}));
+    if(done.length){S.last[e.name]=done;ex.push({name:e.name,sets:done})}
+  });
+  if(ex.length)S.logs.push({date:new Date().toISOString(),routine:r.name,ex});
+  S.session=null;T.end=0;save();go('home');
+}
+
+/* ---------- timer ---------- */
+function updateTimer(){
+  const tm=document.getElementById('tm');if(!tm)return;
+  const ex=curEx(),bar=document.getElementById('tb'),now=Date.now();
+  if(T.end){
+    const rem=Math.max(0,Math.ceil((T.end-now)/1000));
+    tm.textContent=fmt(rem);tm.style.color=rem<=5?'#f87171':'#a3e635';
+    bar.style.width=Math.min(100,(1-(T.end-now)/(T.total*1000))*100)+'%';
+  }else if(now<T.flash){
+    tm.textContent='GO!';tm.style.color='#f87171';bar.style.width='100%';
+  }else{
+    tm.textContent=fmt(ex?ex.rest:0);tm.style.color='#52525b';bar.style.width='0';
+  }
+}
+setInterval(()=>{
+  if(T.end&&Date.now()>=T.end){T.end=0;T.flash=Date.now()+3000;beep()}
+  updateTimer();
+},200);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&S.session)wake()});
+
+/* ---------- backup ---------- */
+const $js=()=>document.getElementById('js');
+const say=t=>{msg=t;const m=document.getElementById('msg');if(m)m.textContent=t};
+function expJ(){
+  const t=JSON.stringify(S,null,1);$js().value=t;$js().select();
+  (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(()=>say('복사 완료! 메모장 등에 붙여넣어 보관하세요.'),()=>say('아래 내용을 직접 선택해 복사하세요.'));
+}
+function dlJ(){
+  try{
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([JSON.stringify(S,null,1)],{type:'application/json'}));
+    a.download='gym-backup-'+new Date().toISOString().slice(0,10)+'.json';
+    document.body.appendChild(a);a.click();a.remove();say('저장을 시도했어요. 안 되면 "내보내기(복사)"를 사용하세요.');
+  }catch(e){say('이 환경에서는 파일 저장이 막혀 있어요. 복사를 사용하세요.')}
+}
+function impJ(){
+  try{
+    const d=JSON.parse($js().value);
+    if(!d||!Array.isArray(d.routines))throw 0;
+    S={routines:d.routines,last:d.last||{},logs:d.logs||[],session:null};
+    T.end=0;save();say('불러오기 완료! 루틴 '+S.routines.length+'개');
+  }catch(e){say('올바른 백업 데이터가 아니에요.')}
+}
+function pickF(el){
+  const f=el.files[0];if(!f)return;
+  const rd=new FileReader();rd.onload=()=>{$js().value=rd.result;say('파일을 읽었어요. "불러오기"를 누르세요.')};rd.readAsText(f);
+}
+
+render();
+</script>
+<script>
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./service-worker.js").catch(err => {
+      console.warn("Service worker registration failed:", err);
+    });
+  });
+}
+</script>
+</body>
+</html>
